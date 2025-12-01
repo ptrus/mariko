@@ -76,7 +76,7 @@ const Layout = () => {
         <p>
           Repository:{" "}
           <a
-            href="https://github.com/ptrus/oasis-events-exporter"
+            href="https://github.com/ptrus/mariko"
             target="_blank"
             rel="noopener noreferrer"
             style={{
