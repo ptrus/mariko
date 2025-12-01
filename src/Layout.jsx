@@ -88,7 +88,7 @@ const Layout = () => {
           </a>
         </p>
         <p style={{ marginTop: "8px" }}>
-          Built: {process.env.REACT_APP_BUILD_DATE || new Date().toISOString()}
+          Built: {import.meta.env.VITE_BUILD_DATE || new Date().toISOString()}
         </p>
       </div>
     </div>

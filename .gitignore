@@ -35,3 +35,6 @@ coverage/
 # Misc
 *.log
 .cache/
+
+# Test data
+test-accounts.txt

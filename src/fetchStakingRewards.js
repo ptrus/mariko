@@ -45,8 +45,43 @@ const fetchBlockTimestamp = async (NEXUS_API, height) => {
 // 2024: epoch 28809 (Jan 1 2024 01:58:02 UTC) -> epoch 37689 (Dec 31 2024 23:24:20 UTC)
 // 2025: epoch 37690 (Jan 1 2025 00:23:11 UTC) -> ongoing (fetches latest epoch)
 const EPOCH_RANGES = {
-  2024: { startEpoch: 28809, endEpoch: 37689 },
+  2024: { startEpoch: 28808, endEpoch: 37690 },
   2025: { startEpoch: 37690, endEpoch: null }, // endEpoch fetched dynamically
+};
+
+// Hardcoded month boundary epochs (first epoch on or after 1st of each month ~00:00 UTC)
+// These were looked up from the blockchain and verified.
+// Key 13 represents the end of the year (Jan 1 of next year)
+const MONTH_EPOCHS_2024 = {
+  1: 28808, // Jan 1 2024 (actual: 2024-01-01T00:58:59Z)
+  2: 29559, // Feb 1 2024 (actual: 2024-02-01T00:13:36Z)
+  3: 30259, // Mar 1 2024 (actual: 2024-03-01T00:23:55Z)
+  4: 31006, // Apr 1 2024 (actual: 2024-04-01T00:07:45Z)
+  5: 31733, // May 1 2024 (actual: 2024-05-01T00:06:24Z)
+  6: 32485, // Jun 1 2024 (actual: 2024-06-01T00:36:58Z)
+  7: 33212, // Jul 1 2024 (actual: 2024-07-01T00:45:42Z)
+  8: 33964, // Aug 1 2024 (actual: 2024-08-01T00:57:12Z)
+  9: 34718, // Sep 1 2024 (actual: 2024-09-01T00:36:49Z)
+  10: 35449, // Oct 1 2024 (actual: 2024-10-01T00:43:21Z)
+  11: 36205, // Nov 1 2024 (actual: 2024-11-01T00:38:07Z)
+  12: 36934, // Dec 1 2024 (actual: 2024-12-01T00:26:18Z)
+  13: 37690, // End of 2024 / Jan 1 2025 (actual: 2025-01-01T00:23:11Z)
+};
+
+const MONTH_EPOCHS_2025 = {
+  1: 37690, // Jan 1 2025 (actual: 2025-01-01T00:23:11Z)
+  2: 38447, // Feb 1 2025 (actual: 2025-02-01T00:14:01Z)
+  3: 39131, // Mar 1 2025 (actual: 2025-03-01T00:29:56Z)
+  4: 39891, // Apr 1 2025 (actual: 2025-04-01T00:56:36Z)
+  5: 40626, // May 1 2025 (actual: 2025-05-01T00:25:09Z)
+  6: 41387, // Jun 1 2025 (actual: 2025-06-01T00:02:11Z)
+  7: 42126, // Jul 1 2025 (actual: 2025-07-01T00:53:43Z)
+  8: 42890, // Aug 1 2025 (actual: 2025-08-01T00:09:35Z)
+  9: 43655, // Sep 1 2025 (actual: 2025-09-01T00:37:50Z)
+  10: 44393, // Oct 1 2025 (actual: 2025-10-01T00:13:04Z)
+  11: 45155, // Nov 1 2025 (actual: 2025-11-01T00:55:48Z)
+  12: 45889, // Dec 1 2025 (actual: 2025-12-01T00:16:34Z)
+  // Month 13 (Jan 1 2026) will be added when available
 };
 
 /**
@@ -249,24 +284,21 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
       return [];
     }
 
-    setProgress(`Found ${validators.length} active validators. Fetching histories...`);
+    setProgress(`Found ${validators.length} active validators.`);
 
-    // Step 6: Fetch validator histories (only for active validators)
-    const validatorHistories = {};
-    for (let i = 0; i < validators.length; i++) {
-      const validator = validators[i];
-      setProgress(`Fetching history for validator ${i + 1}/${validators.length}...`);
+    // Build a cache for validator history entries to avoid redundant fetches
+    // We fetch on-demand instead of all upfront for better performance
+    const historyCache = {}; // { "validator:epoch": historyEntry }
 
-      const { items: history } = await paginatedFetch(
-        `${NEXUS_API}/consensus/validators/${validator}/history`,
-        { from: Math.max(1, startEpoch - 100), to: endEpoch },
-        "history"
-      );
-
-      // Sort by epoch ascending for easier lookup
-      history.sort((a, b) => a.epoch - b.epoch);
-      validatorHistories[validator] = history;
-    }
+    const getHistoryEntry = async (validator, epoch) => {
+      const key = `${validator}:${epoch}`;
+      if (historyCache[key] !== undefined) {
+        return historyCache[key];
+      }
+      const entry = await fetchHistoryAtEpoch(NEXUS_API, validator, epoch);
+      historyCache[key] = entry;
+      return entry;
+    };
 
     // Step 7: Build epoch -> events map for the year
     const eventsByEpoch = {};
@@ -296,21 +328,26 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
     // Step 8: Determine which epochs to sample based on granularity
     setProgress("Building time slices...");
     const epochsToProcess = [];
-    const totalEpochs = endEpoch - startEpoch + 1;
 
     if (granularity === "year") {
       // Just end epoch for yearly summary (prevTotalValue initialized from startEpoch)
       epochsToProcess.push(endEpoch);
     } else {
-      // Monthly: ~12 samples (skip startEpoch, it's used for baseline)
-      const targetSamples = 12;
-      const step = Math.max(1, Math.floor(totalEpochs / targetSamples));
-      for (let e = startEpoch + step; e <= endEpoch; e += step) {
-        epochsToProcess.push(e);
+      // Monthly: use hardcoded month boundary epochs for accurate calendar alignment
+      const monthEpochs = year === 2024 ? MONTH_EPOCHS_2024 : MONTH_EPOCHS_2025;
+
+      // Add month boundaries from 2 to 13 (month 1 is the baseline/start)
+      for (let m = 2; m <= 13; m++) {
+        const epoch = monthEpochs[m];
+        if (epoch && epoch <= endEpoch) {
+          epochsToProcess.push(epoch);
+        }
       }
+
+      // For 2025 or incomplete years, ensure we include the current endEpoch if not already
       if (
         epochsToProcess.length === 0 ||
-        epochsToProcess[epochsToProcess.length - 1] !== endEpoch
+        epochsToProcess[epochsToProcess.length - 1] < endEpoch
       ) {
         epochsToProcess.push(endEpoch);
       }
@@ -348,14 +385,13 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
     const results = [];
 
     // Initialize validator state with initial shares and compute starting value
-    // Fetch history at startEpoch specifically (using narrow from/to range)
     const validatorState = {};
     for (let i = 0; i < validators.length; i++) {
       const validator = validators[i];
       setProgress(`Computing initial value for validator ${i + 1}/${validators.length}...`);
 
-      // Fetch history at startEpoch using targeted request
-      const initialHistoryEntry = await fetchHistoryAtEpoch(NEXUS_API, validator, startEpoch);
+      // Fetch history at startEpoch using cached getter
+      const initialHistoryEntry = await getHistoryEntry(validator, startEpoch);
       const initialShares = sharesPerValidator[validator] || 0n;
       const initialValue = calculateTotalValue(initialShares, initialHistoryEntry);
 
@@ -375,6 +411,10 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
 
       if (!timestamp) continue;
 
+      // Track period start for this row
+      const periodStartEpoch = lastProcessedEpoch;
+      const periodStartTimestamp = epochTimestamps[periodStartEpoch] || "";
+
       // Apply events from lastProcessedEpoch+1 to current epoch
       for (let e = lastProcessedEpoch + 1; e <= epoch; e++) {
         const events = eventsByEpoch[e] || [];
@@ -382,8 +422,8 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
           const state = validatorState[ev.validator];
           if (!state) continue;
 
-          const history = validatorHistories[ev.validator] || [];
-          const historyEntry = findHistoryEntryForEpoch(history, e);
+          // Fetch history entry at event epoch (cached for efficiency)
+          const historyEntry = await getHistoryEntry(ev.validator, e);
 
           if (ev.type === "add") {
             state.shares += ev.shares;
@@ -405,8 +445,8 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
         const state = validatorState[validator];
         if (state.shares === 0n && state.prevTotalValue === 0n) continue;
 
-        const history = validatorHistories[validator] || [];
-        const historyEntry = findHistoryEntryForEpoch(history, epoch);
+        // Fetch history entry at this epoch (cached for efficiency)
+        const historyEntry = await getHistoryEntry(validator, epoch);
 
         if (!historyEntry) continue;
 
@@ -420,9 +460,9 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
           state.periodUndelegationValue;
 
         results.push({
-          start_timestamp: epochTimestamps[startEpoch] || "",
+          start_timestamp: periodStartTimestamp,
           end_timestamp: timestamp,
-          start_epoch: startEpoch,
+          start_epoch: periodStartEpoch,
           end_epoch: epoch,
           validator,
           shares: state.shares.toString(),
