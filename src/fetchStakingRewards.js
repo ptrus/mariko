@@ -1,11 +1,48 @@
 import axios from "axios";
-import { paginatedFetch, normalizeAddress } from "./utils";
+import { paginatedFetch, normalizeAddress, fetchRosePrices, getRosePrice } from "./utils";
 
 /**
  * Fetches staking rewards data for a given address and year.
  */
 
 const ROSE_DECIMALS = 9;
+
+/**
+ * Calculate USD amount from ROSE string value.
+ * @param {string} roseAmount - ROSE amount as string (e.g., "123.456")
+ * @param {number} price - USD price per ROSE
+ * @returns {string|null} - USD amount rounded to 2 decimal places, or null if calculation is not possible
+ */
+const calculateUsdFromRose = (roseAmount, price) => {
+  if (!price || !roseAmount) return null;
+  try {
+    // Parse the ROSE amount string without parseFloat precision loss
+    const isNegative = roseAmount.startsWith("-");
+    const absAmount = isNegative ? roseAmount.slice(1) : roseAmount;
+    const [intPart, decPart = ""] = absAmount.split(".");
+
+    // Scale to 18 decimal places as BigInt for full precision
+    const precision = 18;
+    const paddedDec = decPart.padEnd(precision, "0").slice(0, precision);
+    const scaledAmount = BigInt(intPart + paddedDec);
+
+    // Scale price (8 decimal places)
+    const scaledPrice = BigInt(Math.round(price * 100000000));
+
+    // Calculate USD: (scaledAmount * scaledPrice) / 10^24 = cents
+    // Add half-cent rounding (divisor/2) before division
+    const divisor = 10n ** 24n;
+    const halfDivisor = divisor / 2n;
+    const product = scaledAmount * scaledPrice;
+    const cents = (product + halfDivisor) / divisor;
+
+    const centsNum = Number(cents);
+    const dollars = (isNegative ? -centsNum : centsNum) / 100;
+    return dollars.toFixed(2);
+  } catch {
+    return null;
+  }
+};
 
 /**
  * Convert base units to ROSE (human readable string with decimals)
@@ -112,7 +149,7 @@ const calculateShareValue = (historyEntry) => {
   const balance = BigInt(historyEntry?.active_balance || "0");
   const shares = BigInt(historyEntry?.active_shares || "1");
   if (shares === 0n) return 0n;
-  return (balance * BigInt(1e18)) / shares;
+  return (balance * 10n ** 18n) / shares;
 };
 
 /**
@@ -168,6 +205,9 @@ const fetchHistoryAtEpoch = async (NEXUS_API, validator, targetEpoch) => {
   return findHistoryEntryForEpoch(history, targetEpoch);
 };
 
+// Export for testing
+export { calculateUsdFromRose };
+
 /**
  * Main function to fetch staking rewards
  */
@@ -176,6 +216,10 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
   const normalizedAddress = normalizeAddress(address);
 
   try {
+    // Fetch ROSE prices from GitHub (cached)
+    setProgress("Fetching ROSE prices...");
+    const rosePrices = await fetchRosePrices((warning) => warnings.push(warning));
+
     // Step 1: Get epoch range for the year
     const { startEpoch, endEpoch } = await getEpochsForYear(NEXUS_API, year);
 
@@ -456,6 +500,9 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
           state.periodDelegationValue +
           state.periodUndelegationValue;
 
+        const rewardsRose = toRose(earned);
+        const endPrice = getRosePrice(rosePrices, timestamp);
+
         results.push({
           start_timestamp: periodStartTimestamp,
           end_timestamp: timestamp,
@@ -465,7 +512,9 @@ export const fetchStakingRewards = async (NEXUS_API, address, year, granularity,
           shares: state.shares.toString(),
           share_price: toRose(shareValueScaled, 18),
           delegation_value: toRose(totalValue),
-          rewards: toRose(earned),
+          rewards: rewardsRose,
+          usd_price: endPrice,
+          usd_reward: calculateUsdFromRose(rewardsRose, endPrice),
         });
 
         state.prevTotalValue = totalValue;

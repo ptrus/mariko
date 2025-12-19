@@ -67,6 +67,8 @@ const StakingRewards = () => {
       "share_price",
       "delegation_value",
       "rewards",
+      "usd_price",
+      "usd_reward",
     ];
     const csvData = Papa.unparse({ data: rows, fields: keys });
     const blob = new Blob([csvData], { type: "text/csv;charset=utf-8;" });
@@ -229,6 +231,10 @@ const StakingRewards = () => {
           </li>
           <li>
             <strong>rewards</strong> - Staking rewards earned in this period
+          </li>
+          <li>
+            <strong>usd_price, usd_reward</strong> - USD price at period end and reward value
+            (prices sourced from Binance)
           </li>
         </ul>
       </div>

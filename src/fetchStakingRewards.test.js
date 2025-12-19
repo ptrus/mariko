@@ -1,3 +1,5 @@
+import { calculateUsdFromRose } from "./fetchStakingRewards";
+
 /**
  * Tests for staking rewards calculation logic
  */
@@ -297,7 +299,7 @@ describe("Staking Rewards Calculations", () => {
       const balance = BigInt(historyEntry.active_balance || "0");
       const shares = BigInt(historyEntry.active_shares || "1");
       if (shares === 0n) return 0n;
-      return (balance * BigInt(1e18)) / shares;
+      return (balance * 10n ** 18n) / shares;
     };
 
     it("should calculate share value correctly", () => {
@@ -405,7 +407,7 @@ describe("Staking Rewards Calculations", () => {
     it("should calculate delegation_value = shares * share_price / 1e18", () => {
       const numShares = BigInt("1000000000000"); // 1 trillion shares
       const shareValueScaled = BigInt("1391000000000000000"); // 1.391 * 1e18
-      const totalValue = (numShares * shareValueScaled) / BigInt(1e18);
+      const totalValue = (numShares * shareValueScaled) / 10n ** 18n;
 
       expect(totalValue.toString()).toBe("1391000000000");
     });
@@ -736,6 +738,165 @@ describe("Staking Rewards Calculations", () => {
           response.total_count > 0 + response.events.length);
 
       expect(needsMorePages).toBe(false);
+    });
+  });
+
+  describe("USD price calculations for staking rewards", () => {
+    // Mock price lookup
+    const mockPrices = {
+      "2024-01-31": 0.12,
+      "2024-02-29": 0.11,
+      "2024-03-31": 0.13,
+      "2024-12-31": 0.085,
+    };
+
+    const getRosePrice = (prices, timestamp) => {
+      if (!timestamp || !prices) return null;
+      const date = timestamp.split("T")[0];
+      return prices[date] ?? null;
+    };
+
+    it("should look up price by date from end_timestamp", () => {
+      expect(getRosePrice(mockPrices, "2024-01-31T23:59:59Z")).toBe(0.12);
+      expect(getRosePrice(mockPrices, "2024-12-31T00:00:00Z")).toBe(0.085);
+    });
+
+    it("should return null for dates without price data", () => {
+      expect(getRosePrice(mockPrices, "2024-01-15T00:00:00Z")).toBeNull();
+    });
+
+    it("should calculate USD reward correctly from ROSE string", () => {
+      // 100 ROSE rewards at $0.12 = $12.00
+      const result = calculateUsdFromRose("100", 0.12);
+      expect(result).toBe("12.00");
+    });
+
+    it("should calculate USD reward for decimal ROSE amounts", () => {
+      // 50.5 ROSE rewards at $0.10 = $5.05
+      const result = calculateUsdFromRose("50.5", 0.1);
+      expect(result).toBe("5.05");
+    });
+
+    it("should calculate USD reward for large amounts", () => {
+      // 10000 ROSE rewards at $0.085 = $850.00
+      const result = calculateUsdFromRose("10000", 0.085);
+      expect(result).toBe("850.00");
+    });
+
+    it("should handle very large amounts without precision loss (1 billion ROSE)", () => {
+      // 1,000,000,000 ROSE at $0.10 = $100,000,000
+      const result = calculateUsdFromRose("1000000000", 0.1);
+      expect(result).toBe("100000000.00");
+    });
+
+    it("should preserve precision for amounts with many decimal places", () => {
+      // 123.456789012345678901 ROSE at $1.00 = $123.456... rounds to $123.46
+      // Should handle without parseFloat precision loss
+      const result = calculateUsdFromRose("123.456789012345678901", 1.0);
+      expect(result).toBe("123.46");
+    });
+
+    it("should round to nearest cent, not truncate", () => {
+      // 1 ROSE at $0.105 = $0.105 should round to $0.11 (not truncate to $0.10)
+      const result = calculateUsdFromRose("1", 0.105);
+      expect(result).toBe("0.11");
+    });
+
+    it("should calculate USD reward for small amounts", () => {
+      // 0.123456789 ROSE at $0.10 = $0.01
+      const result = calculateUsdFromRose("0.123456789", 0.1);
+      expect(result).toBe("0.01");
+    });
+
+    it("should return null for USD reward when price is null", () => {
+      const result = calculateUsdFromRose("100", null);
+      expect(result).toBeNull();
+    });
+
+    it("should return null for USD reward when reward is null", () => {
+      const result = calculateUsdFromRose(null, 0.12);
+      expect(result).toBeNull();
+    });
+
+    it("should return null for invalid ROSE amount", () => {
+      const result = calculateUsdFromRose("not-a-number", 0.12);
+      expect(result).toBeNull();
+    });
+
+    it("should return null for empty string amount", () => {
+      const result = calculateUsdFromRose("", 0.12);
+      expect(result).toBeNull();
+    });
+
+    it("should return null when price is zero", () => {
+      const result = calculateUsdFromRose("100", 0);
+      expect(result).toBeNull();
+    });
+
+    it("should handle zero ROSE amount", () => {
+      const result = calculateUsdFromRose("0", 0.12);
+      expect(result).toBe("0.00");
+    });
+
+    it("should handle negative rewards (slashing)", () => {
+      // -50 ROSE at $0.10 = -$5.00
+      const result = calculateUsdFromRose("-50", 0.1);
+      expect(result).toBe("-5.00");
+    });
+
+    it("should add USD fields to staking reward row", () => {
+      const row = {
+        start_timestamp: "2024-01-01T00:00:00Z",
+        end_timestamp: "2024-01-31T23:59:59Z",
+        validator: "oasis1qvalidator",
+        rewards: "123.456789",
+      };
+
+      const price = getRosePrice(mockPrices, row.end_timestamp);
+      row.usd_price = price;
+      row.usd_reward = calculateUsdFromRose(row.rewards, price);
+
+      expect(row.usd_price).toBe(0.12);
+      expect(row.usd_reward).toBe("14.81");
+    });
+
+    it("should handle row with missing price data", () => {
+      const row = {
+        start_timestamp: "2024-05-01T00:00:00Z",
+        end_timestamp: "2024-05-31T23:59:59Z",
+        validator: "oasis1qvalidator",
+        rewards: "100",
+      };
+
+      const price = getRosePrice(mockPrices, row.end_timestamp);
+      row.usd_price = price;
+      row.usd_reward = calculateUsdFromRose(row.rewards, price);
+
+      expect(row.usd_price).toBeNull();
+      expect(row.usd_reward).toBeNull();
+    });
+  });
+
+  describe("CSV field ordering for staking rewards", () => {
+    it("should have correct field order including USD fields", () => {
+      const expectedKeys = [
+        "start_timestamp",
+        "end_timestamp",
+        "start_epoch",
+        "end_epoch",
+        "validator",
+        "shares",
+        "share_price",
+        "delegation_value",
+        "rewards",
+        "usd_price",
+        "usd_reward",
+      ];
+
+      expect(expectedKeys.length).toBe(11);
+      expect(expectedKeys[0]).toBe("start_timestamp");
+      expect(expectedKeys[expectedKeys.length - 2]).toBe("usd_price");
+      expect(expectedKeys[expectedKeys.length - 1]).toBe("usd_reward");
     });
   });
 });
