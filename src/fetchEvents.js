@@ -1,9 +1,55 @@
 import axios from "axios";
-import { paginatedFetch, normalizeAddress, createAddressSet, b64ToHex } from "./utils";
+import {
+  paginatedFetch,
+  normalizeAddress,
+  createAddressSet,
+  b64ToHex,
+  fetchRosePrices,
+  getRosePrice,
+} from "./utils";
 
 const SAPPHIRE_FEE_ACCUMULATOR = "oasis1qp3r8hgsnphajmfzfuaa8fhjag7e0yt35cjxq0u4";
 
+// wROSE contract address on Sapphire (same price as ROSE)
+const WROSE_CONTRACT = normalizeAddress("0x8Bc2B030b299964eEfb5e1e0b36991352E56D2D3");
+
 const ERC20_TRANSFER_SIGNATURE = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/**
+ * Calculate USD amount from base units.
+ * @param {string} amount - Amount in base units
+ * @param {number} decimals - Token decimals
+ * @param {number} price - USD price per token
+ * @returns {string|null} - USD amount rounded to 2 decimal places, or null if calculation is not possible
+ */
+const calculateUsdAmount = (amount, decimals, price) => {
+  if (!price || !amount) return null;
+  try {
+    const baseUnits = BigInt(amount);
+    const divisor = 10n ** BigInt(decimals); // Use BigInt exponentiation
+
+    // Scale up before division to preserve fractional precision
+    const scaleFactor = 100000000n; // 1e8
+    const scaledTokenAmount = (baseUnits * scaleFactor) / divisor;
+
+    // Convert to token amount (safe for amounts up to ~90 quadrillion)
+    const tokenAmount = Number(scaledTokenAmount) / 100000000;
+    return (tokenAmount * price).toFixed(2);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Check if a token is ROSE or wROSE (priced the same).
+ * @param {object} row - Event row
+ * @returns {boolean}
+ */
+const isRoseOrWrose = (row) => {
+  if (row.symbol === "ROSE") return true;
+  if (row.contract === WROSE_CONTRACT) return true;
+  return false;
+};
 
 const consensusEvents = (events, myAddresses) => {
   return events.map((ev) => {
@@ -246,10 +292,17 @@ const sapphireEvents = (events, transactions, myAddresses) => {
   return results;
 };
 
+// Export for testing
+export { calculateUsdAmount };
+
 export const fetchEvents = async (NEXUS_API, address, year, before, after, layer, setProgress) => {
   const warnings = [];
 
   try {
+    // Fetch ROSE prices from GitHub (cached)
+    setProgress("Fetching ROSE prices...");
+    const rosePrices = await fetchRosePrices((warning) => warnings.push(warning));
+
     setProgress("Fetching account details...");
     const accountResponse = await axios.get(`${NEXUS_API}/${layer}/accounts/${address}`);
     const myAddresses = createAddressSet([address, accountResponse.data?.address].filter(Boolean));
@@ -258,7 +311,9 @@ export const fetchEvents = async (NEXUS_API, address, year, before, after, layer
     const { items: events, wasClipped: eventsClipped } = await paginatedFetch(
       `${NEXUS_API}/${layer}/events`,
       { after, before, rel: address },
-      "events"
+      "events",
+      1000,
+      (count, page) => setProgress(`Fetching events... (${count} items, page ${page})`)
     );
 
     if (eventsClipped) {
@@ -271,7 +326,9 @@ export const fetchEvents = async (NEXUS_API, address, year, before, after, layer
       const { items: txItems, wasClipped: txClipped } = await paginatedFetch(
         `${NEXUS_API}/${layer}/transactions`,
         { after, before, rel: address },
-        "transactions"
+        "transactions",
+        1000,
+        (count, page) => setProgress(`Fetching transactions... (${count} items, page ${page})`)
       );
       transactions = txItems;
 
@@ -307,6 +364,19 @@ export const fetchEvents = async (NEXUS_API, address, year, before, after, layer
     } else {
       throw new Error(`Unknown layer: ${layer}`);
     }
+
+    // Add USD price and amount for ROSE and wROSE transactions
+    results = results.map((row) => {
+      if (isRoseOrWrose(row)) {
+        const price = getRosePrice(rosePrices, row.timestamp);
+        row.usd_price = price;
+        row.usd_amount = calculateUsdAmount(row.amount, row.decimals, price);
+      } else {
+        row.usd_price = null;
+        row.usd_amount = null;
+      }
+      return row;
+    });
 
     // Log warnings if any
     if (warnings.length > 0) {

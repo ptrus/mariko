@@ -77,6 +77,8 @@ const AccountingEvents = () => {
       "symbol",
       "decimals",
       "contract",
+      "usd_price",
+      "usd_amount",
     ];
     const csvData = Papa.unparse({ data: rows, fields: keys });
     const blob = new Blob([csvData], { type: "text/csv;charset=utf-8;" });
@@ -233,6 +235,10 @@ const AccountingEvents = () => {
           </li>
           <li>
             <strong>contract</strong> - Token contract address (ERC20 only)
+          </li>
+          <li>
+            <strong>usd_price, usd_amount</strong> - USD price and value at time of transaction
+            (ROSE and wROSE only, prices sourced from Binance)
           </li>
         </ul>
       </div>

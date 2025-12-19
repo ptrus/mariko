@@ -1,0 +1,38 @@
+name: update-prices
+
+on:
+  schedule:
+    # Run daily at 01:00 UTC (after midnight to ensure previous day's candle is closed)
+    - cron: '0 1 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Update ROSE prices
+        run: node scripts/update-prices.js
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          if git diff --quiet; then
+            echo "No changes to commit"
+          else
+            git add src/prices/rose-usd.json
+            git commit -m "chore: update ROSE/USD prices"
+            git push
+          fi

@@ -3,6 +3,29 @@ import axios from "axios";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Fetch with retry logic.
+ * @param {function} fetchFn - Async function to execute
+ * @param {number} maxRetries - Maximum number of retries (default 3)
+ * @param {number} baseDelay - Base delay in ms for exponential backoff (default 1000)
+ * @returns {Promise<*>} - Result of the fetch function
+ */
+const fetchWithRetry = async (fetchFn, maxRetries = 3, baseDelay = 1000) => {
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetchFn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt);
+        await sleep(delay);
+      }
+    }
+  }
+  throw lastError;
+};
+
+/**
  * Paginated fetch helper that handles limit/offset pagination.
  * Stops when items.length < limit or offset >= total_count.
  * Returns { items, wasClipped } where wasClipped indicates if data was truncated.
@@ -11,21 +34,26 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {object} params - Query parameters (limit will be set automatically)
  * @param {string} itemsKey - The key in response.data containing the items array
  * @param {number} limit - Page size (default 1000)
+ * @param {function} onProgress - Optional callback for progress updates (called with items count)
  * @returns {Promise<{items: Array, wasClipped: boolean}>}
  */
-export const paginatedFetch = async (url, params, itemsKey, limit = 1000) => {
+export const paginatedFetch = async (url, params, itemsKey, limit = 1000, onProgress = null) => {
   let items = [];
   let offset = 0;
   let wasClipped = false;
+  let pageNum = 1;
 
   while (true) {
-    const response = await axios.get(url, {
-      params: {
-        ...params,
-        limit,
-        offset,
-      },
-    });
+    const currentOffset = offset;
+    const response = await fetchWithRetry(() =>
+      axios.get(url, {
+        params: {
+          ...params,
+          limit,
+          offset: currentOffset,
+        },
+      })
+    );
 
     const pageItems = response.data[itemsKey] || [];
     items = [...items, ...pageItems];
@@ -33,6 +61,11 @@ export const paginatedFetch = async (url, params, itemsKey, limit = 1000) => {
     // Track if data was clipped
     if (response.data.is_total_count_clipped) {
       wasClipped = true;
+    }
+
+    // Report progress if callback provided
+    if (onProgress) {
+      onProgress(items.length, pageNum);
     }
 
     // Break if we got fewer than the limit (last page)
@@ -44,6 +77,7 @@ export const paginatedFetch = async (url, params, itemsKey, limit = 1000) => {
     }
 
     offset += pageItems.length;
+    pageNum++;
     await sleep(100);
   }
 
@@ -99,4 +133,47 @@ export const b64ToHex = (b64) => {
  */
 export const safeGet = (obj, path, defaultValue = undefined) => {
   return path.split(".").reduce((acc, part) => acc?.[part], obj) ?? defaultValue;
+};
+
+// GitHub raw URL for ROSE/USD price data
+const ROSE_PRICES_URL =
+  "https://raw.githubusercontent.com/oasisprotocol/csv-exporter/master/src/prices/rose-usd.json";
+
+// Cached price data
+let rosePricesCache = null;
+
+/**
+ * Fetch ROSE/USD price data from GitHub (cached).
+ * @param {function} [onWarning] - Optional callback for warning messages
+ * @returns {Promise<object>} - Object mapping dates to USD prices
+ */
+export const fetchRosePrices = async (onWarning) => {
+  if (rosePricesCache) {
+    return rosePricesCache;
+  }
+
+  try {
+    const response = await axios.get(ROSE_PRICES_URL);
+    rosePricesCache = response.data;
+    return rosePricesCache;
+  } catch (error) {
+    const message = `Failed to fetch ROSE prices: ${error.message}. USD values will not be available.`;
+    console.error(message);
+    if (onWarning) {
+      onWarning(message);
+    }
+    return {};
+  }
+};
+
+/**
+ * Get the USD price for ROSE on a given date.
+ * @param {object} prices - Price data object from fetchRosePrices()
+ * @param {string} timestamp - ISO timestamp
+ * @returns {number|null} - USD price or null if not available
+ */
+export const getRosePrice = (prices, timestamp) => {
+  if (!timestamp || !prices) return null;
+  const date = timestamp.split("T")[0]; // Extract YYYY-MM-DD
+  return prices[date] ?? null;
 };

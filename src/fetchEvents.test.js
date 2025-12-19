@@ -1,3 +1,5 @@
+import { calculateUsdAmount } from "./fetchEvents";
+
 /**
  * Tests for accounting events (fetchEvents.js) calculation logic
  */
@@ -351,7 +353,7 @@ describe("Accounting Events Calculations", () => {
   });
 
   describe("CSV field ordering", () => {
-    it("should have correct field order for output", () => {
+    it("should have correct field order for output including USD fields", () => {
       const expectedKeys = [
         "timestamp",
         "block_height",
@@ -365,11 +367,183 @@ describe("Accounting Events Calculations", () => {
         "symbol",
         "decimals",
         "contract",
+        "usd_price",
+        "usd_amount",
       ];
 
-      expect(expectedKeys.length).toBe(12);
+      expect(expectedKeys.length).toBe(14);
       expect(expectedKeys[0]).toBe("timestamp");
-      expect(expectedKeys[expectedKeys.length - 1]).toBe("contract");
+      expect(expectedKeys[expectedKeys.length - 2]).toBe("usd_price");
+      expect(expectedKeys[expectedKeys.length - 1]).toBe("usd_amount");
+    });
+  });
+
+  describe("USD price calculations", () => {
+    // Mock price lookup
+    const mockPrices = {
+      "2024-01-15": 0.0892,
+      "2024-06-20": 0.1234,
+      "2024-12-25": 0.0756,
+    };
+
+    const getRosePrice = (prices, timestamp) => {
+      if (!timestamp || !prices) return null;
+      const date = timestamp.split("T")[0];
+      return prices[date] ?? null;
+    };
+
+    const WROSE_CONTRACT = "0x8bc2b030b299964eefb5e1e0b36991352e56d2d3";
+
+    const isRoseOrWrose = (row) => {
+      if (row.symbol === "ROSE") return true;
+      if (row.contract && row.contract.toLowerCase() === WROSE_CONTRACT) return true;
+      return false;
+    };
+
+    it("should look up price by date from timestamp", () => {
+      expect(getRosePrice(mockPrices, "2024-01-15T10:30:00Z")).toBe(0.0892);
+      expect(getRosePrice(mockPrices, "2024-06-20T23:59:59Z")).toBe(0.1234);
+      expect(getRosePrice(mockPrices, "2024-12-25T00:00:00Z")).toBe(0.0756);
+    });
+
+    it("should return null for dates without price data", () => {
+      expect(getRosePrice(mockPrices, "2023-01-01T00:00:00Z")).toBeNull();
+      expect(getRosePrice(mockPrices, "2024-01-16T00:00:00Z")).toBeNull();
+    });
+
+    it("should return null for invalid inputs", () => {
+      expect(getRosePrice(null, "2024-01-15T00:00:00Z")).toBeNull();
+      expect(getRosePrice(mockPrices, null)).toBeNull();
+      expect(getRosePrice(mockPrices, "")).toBeNull();
+    });
+
+    it("should calculate USD amount correctly for ROSE (18 decimals)", () => {
+      // 100 ROSE at $0.10 = $10.00
+      const amount = "100000000000000000000"; // 100 * 10^18
+      const result = calculateUsdAmount(amount, 18, 0.1);
+      expect(result).toBe("10.00");
+    });
+
+    it("should calculate USD amount correctly for small amounts", () => {
+      // 0.5 ROSE at $0.0892 = $0.0446
+      const amount = "500000000000000000"; // 0.5 * 10^18
+      const result = calculateUsdAmount(amount, 18, 0.0892);
+      expect(result).toBe("0.04");
+    });
+
+    it("should calculate USD amount correctly for large amounts", () => {
+      // 1,000,000 ROSE at $0.10 = $100,000
+      const amount = "1000000000000000000000000"; // 1e6 * 10^18
+      const result = calculateUsdAmount(amount, 18, 0.1);
+      expect(result).toBe("100000.00");
+    });
+
+    it("should handle very large amounts without precision loss (1 billion ROSE)", () => {
+      // 1,000,000,000 ROSE at $0.10 = $100,000,000
+      const amount = "1000000000000000000000000000"; // 1e9 * 10^18
+      const result = calculateUsdAmount(amount, 18, 0.1);
+      expect(result).toBe("100000000.00");
+    });
+
+    it("should use BigInt exponentiation for divisor (high decimals)", () => {
+      // Test with 20 decimals - would fail with 10 ** 20 in float
+      // 1 token at $1.00 = $1.00
+      const amount = "100000000000000000000"; // 1 * 10^20
+      const result = calculateUsdAmount(amount, 20, 1.0);
+      expect(result).toBe("1.00");
+    });
+
+    it("should return null for USD amount when price is null", () => {
+      const result = calculateUsdAmount("1000000000000000000", 18, null);
+      expect(result).toBeNull();
+    });
+
+    it("should return null for USD amount when price is zero", () => {
+      const result = calculateUsdAmount("1000000000000000000", 18, 0);
+      expect(result).toBeNull();
+    });
+
+    it("should return null for USD amount when amount is null", () => {
+      const result = calculateUsdAmount(null, 18, 0.1);
+      expect(result).toBeNull();
+    });
+
+    it("should return null for USD amount when amount is empty string", () => {
+      const result = calculateUsdAmount("", 18, 0.1);
+      expect(result).toBeNull();
+    });
+
+    it("should handle zero amount", () => {
+      const result = calculateUsdAmount("0", 18, 0.1);
+      expect(result).toBe("0.00");
+    });
+
+    it("should return null for invalid amount string", () => {
+      const result = calculateUsdAmount("not-a-number", 18, 0.1);
+      expect(result).toBeNull();
+    });
+
+    it("should identify ROSE token for USD pricing", () => {
+      const roseRow = { symbol: "ROSE", amount: "1000" };
+      expect(isRoseOrWrose(roseRow)).toBe(true);
+    });
+
+    it("should identify wROSE token for USD pricing", () => {
+      const wroseRow = {
+        symbol: "wROSE",
+        contract: "0x8Bc2B030b299964eEfb5e1e0b36991352E56D2D3",
+      };
+      expect(isRoseOrWrose(wroseRow)).toBe(true);
+    });
+
+    it("should not price other ERC20 tokens", () => {
+      const otherToken = {
+        symbol: "USDC",
+        contract: "0x1234567890123456789012345678901234567890",
+      };
+      expect(isRoseOrWrose(otherToken)).toBe(false);
+    });
+
+    it("should add USD fields to ROSE transfers", () => {
+      const row = {
+        timestamp: "2024-01-15T10:30:00Z",
+        type: "accounts.transfer",
+        symbol: "ROSE",
+        decimals: 18,
+        amount: "1000000000000000000", // 1 ROSE
+      };
+
+      if (isRoseOrWrose(row)) {
+        const price = getRosePrice(mockPrices, row.timestamp);
+        row.usd_price = price;
+        row.usd_amount = calculateUsdAmount(row.amount, row.decimals, price);
+      }
+
+      expect(row.usd_price).toBe(0.0892);
+      expect(row.usd_amount).toBe("0.09");
+    });
+
+    it("should set null USD fields for non-ROSE tokens", () => {
+      const row = {
+        timestamp: "2024-01-15T10:30:00Z",
+        type: "evm.log",
+        symbol: "USDT",
+        decimals: 6,
+        amount: "1000000",
+        contract: "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      };
+
+      if (isRoseOrWrose(row)) {
+        const price = getRosePrice(mockPrices, row.timestamp);
+        row.usd_price = price;
+        row.usd_amount = calculateUsdAmount(row.amount, row.decimals, price);
+      } else {
+        row.usd_price = null;
+        row.usd_amount = null;
+      }
+
+      expect(row.usd_price).toBeNull();
+      expect(row.usd_amount).toBeNull();
     });
   });
 
